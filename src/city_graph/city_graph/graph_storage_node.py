@@ -1,52 +1,54 @@
 import rclpy
 from rclpy.node import Node
-from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
+from rclpy.qos import (
+    QoSProfile, ReliabilityPolicy, DurabilityPolicy, HistoryPolicy,
+)
 
 from city_interfaces.msg import Graph, GraphUpdate
-from city_interfaces.srv import GetGraph
 
 from city_graph.graph_data import (
-    EDGE_NAMES, BOOL_ATTRS, LIST_ATTRS,
-    Road, build_default_graph, parse_bool,
+    BOOL_ATTRS, LIST_ATTRS, Road,
+    build_default_graph, build_graph_msg, parse_bool,
 )
 
 
 class GraphStorageNode(Node):
     """
-    Хранит граф дорог полигона и предоставляет доступ к нему.
+    Хранит граф дорог и публикует его актуальную версию.
 
-    Вход:   /graph_updates (GraphUpdate) — атомарные изменения атрибутов рёбер
-    Выход:  /get_graph     (GetGraph)    — по запросу отдаёт полный граф
+    Вход:   /graph_updates (GraphUpdate) — атомарные правки атрибутов рёбер
+    Выход:  /graph         (Graph)       — полный граф после каждой правки
+                                            и один раз при старте.
+
+    Оба топика — RELIABLE. /graph дополнительно TRANSIENT_LOCAL(depth=1):
+    поздний подписчик (например, только что запустившийся goal_manager_node)
+    сразу получает последнюю опубликованную версию графа.
     """
 
     def __init__(self) -> None:
         super().__init__('graph_storage_node')
 
-        # --- состояние: единственная точка правды ---
-        # Все изменения графа происходят в колбэке _on_update,
-        # колбэк _on_get_graph только читает. В rclpy при single-threaded
-        # executor'е этого достаточно, чтобы не блокироваться.
         self._roads = build_default_graph()
 
-        # --- QoS: гарантируем доставку каждого обновления ---
         update_qos = QoSProfile(
             reliability=ReliabilityPolicy.RELIABLE,
             history=HistoryPolicy.KEEP_LAST,
             depth=64,
         )
+        graph_qos = QoSProfile(
+            reliability=ReliabilityPolicy.RELIABLE,
+            durability=DurabilityPolicy.TRANSIENT_LOCAL,
+            history=HistoryPolicy.KEEP_LAST,
+            depth=1,
+        )
 
+        self._pub = self.create_publisher(Graph, '/graph', graph_qos)
         self._sub = self.create_subscription(
-            GraphUpdate,
-            '/graph_updates',
-            self._on_update,
-            update_qos,
+            GraphUpdate, '/graph_updates', self._on_update, update_qos
         )
 
-        self._srv = self.create_service(
-            GetGraph,
-            '/get_graph',
-            self._on_get_graph,
-        )
+        # Первичная публикация — чтобы поздние подписчики не ждали первой правки.
+        self._publish_graph()
 
         self.get_logger().info(
             f'graph_storage_node up: {len(self._roads)} directed edges'
@@ -62,10 +64,9 @@ class GraphStorageNode(Node):
             return
 
         attr = msg.attribute_name
-
         try:
             if attr in BOOL_ATTRS:
-                self._apply_bool(road, attr, msg.values)
+                setattr(road, attr, parse_bool(msg.values))
             elif attr in LIST_ATTRS:
                 self._apply_list(road, attr, msg.values)
             else:
@@ -82,18 +83,13 @@ class GraphStorageNode(Node):
         self.get_logger().info(
             f'update: {road.name}.{attr} <- {list(msg.values)}'
         )
-
-    def _apply_bool(self, road: Road, attr: str, values) -> None:
-        setattr(road, attr, parse_bool(values))
+        self._publish_graph()
 
     def _apply_list(self, road: Road, attr: str, values) -> None:
-        # Семантика: массив values = «полный список». Пустой массив — очистить.
-        # Это позволяет sign_handler'у перезаписывать forbidden_entry целиком,
-        # если правило знака поменялось.
+        # Полная замена списка. Пустой массив = очистить.
         validated = []
         for v in values:
             if v not in self._roads:
-                # не роняем ноду из-за одной плохой ссылки
                 self.get_logger().warn(
                     f'{road.name}.{attr}: unknown referenced edge "{v}"'
                 )
@@ -106,13 +102,10 @@ class GraphStorageNode(Node):
             validated.append(v)
         setattr(road, attr, validated)
 
-    # ------------------------------------------------------------------ srv
-    def _on_get_graph(self, request, response):
-        graph = Graph()
-        # Порядок строго по EDGE_NAMES — goal_manager может на него опираться
-        graph.roads = [self._roads[name].to_msg() for name in EDGE_NAMES]
-        response.graph = graph
-        return response
+    # ------------------------------------------------------------------ pub
+    def _publish_graph(self) -> None:
+        self._pub.publish(build_graph_msg(self._roads))
+
 
 def main(args=None) -> None:
     rclpy.init(args=args)
