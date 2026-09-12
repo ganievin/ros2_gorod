@@ -114,7 +114,7 @@ class GoalManagerNode(Node):
         Наполняет self._buffer новым путём. Если путь не найден или миссия
         завершена — оставляет буфер пустым (это сигнал "нет целей").
         """
-        # ---- 0. Миссия завершена? Мы на парковочном ребре. ----
+        # ---- 0. Миссия завершена? Мы физически на парковочном ребре. ----
         if self._current.position_type == 'edge':
             cur_edge = self._roads.get(self._current.edge_name)
             if cur_edge is not None and cur_edge.have_parking:
@@ -131,16 +131,24 @@ class GoalManagerNode(Node):
         parking_known = any(r.have_parking for r in self._roads.values())
 
         if passenger_count >= 2 and parking_known:
-            # Фаза В: все пассажиры собраны, едем на парковку
+            # Фаза PARKING: всех пассажиров собрали, знаем где парковка.
+            # Цель — доехать до ЛЮБОГО ребра с have_parking, даже если
+            # оно уже помечено is_visited (например, робот проезжал по
+            # нему раньше, но не мог остановиться, т.к. пассажиров было
+            # меньше двух).
             target_predicate = lambda r: r.have_parking
+            require_unvisited = False
             phase = 'PARKING'
         elif passenger_count >= 2 and not parking_known:
-            # Парковка ещё не найдена — исследуем дальше
+            # Парковка ещё не обнаружена — исследуем город дальше.
             target_predicate = lambda r: True
+            require_unvisited = True
             phase = 'EXPLORE_FOR_PARKING'
         else:
-            # Фаза А/Б: пассажиров ещё не хватает — исследуем
+            # Пассажиров ещё не хватает — исследуем город в поисках
+            # знаков посадки.
             target_predicate = lambda r: True
+            require_unvisited = True
             phase = 'EXPLORE_FOR_PASSENGERS'
 
         # ---- 2. Определяем стартовый узел и ребро входа ----
@@ -156,7 +164,8 @@ class GoalManagerNode(Node):
         self.get_logger().info(
             f'planning from node {start_node}, entry_edge={entry_edge}, '
             f'phase={phase}, passengers={passenger_count}, '
-            f'parking_known={parking_known}'
+            f'parking_known={parking_known}, '
+            f'require_unvisited={require_unvisited}'
         )
 
         # ---- 3. BFS ----
@@ -165,9 +174,25 @@ class GoalManagerNode(Node):
             self._roads,
             target_predicate,
             entry_edge=entry_edge,
+            require_unvisited=require_unvisited,
         )
         if path is None:
-            self.get_logger().warn('BFS found no route — buffer stays empty')
+            # Осмысленный warn: разложим по полочкам, что именно не нашлось.
+            if phase == 'PARKING':
+                parking_edges = [
+                    r.name for r in self._roads.values() if r.have_parking
+                ]
+                self.get_logger().warn(
+                    f'PARKING phase: parking edges known {parking_edges}, '
+                    f'but no route from {start_node} '
+                    f'(entry_edge={entry_edge}) — buffer stays empty'
+                )
+            else:
+                self.get_logger().warn(
+                    f'{phase}: BFS found no unvisited edge reachable '
+                    f'from {start_node} (entry_edge={entry_edge}) — '
+                    f'buffer stays empty'
+                )
             return
 
         self._buffer.extend(path)
@@ -184,7 +209,7 @@ class GoalManagerNode(Node):
             ребро входа;
           * position_type == 'edge' — едем к концу текущего ребра,
             entry_edge = текущее ребро;
-          * иначе — не можем планировать.
+          * иначе — планировать нельзя.
         """
         pos = self._current
         if pos.position_type == 'node':

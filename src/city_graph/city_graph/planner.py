@@ -17,29 +17,40 @@ def bfs_find_target(
     roads: Dict[str, Road],
     target_predicate: Callable[[Road], bool],
     entry_edge: Optional[str] = None,
+    require_unvisited: bool = True,
     max_depth: int = MAX_DEPTH,
 ) -> Optional[List[str]]:
     """
-    BFS от start_node. Возвращает кратчайший (в порядке BFS с лексикографическим
-    tie-break) путь [e1, e2, ..., ek], у которого ПОСЛЕДНЕЕ ребро ek:
-      * не is_visited
-      * удовлетворяет target_predicate(ek)
+    BFS от start_node. Возвращает кратчайший (в порядке BFS с
+    лексикографическим tie-break) путь [e1, e2, ..., ek], у которого
+    ПОСЛЕДНЕЕ ребро ek удовлетворяет target_predicate(ek).
 
-    Промежуточные рёбра могут быть посещёнными (транзит).
+    require_unvisited:
+      * True  — целевое ребро обязано иметь is_visited == False.
+                Используется в фазах исследования (EXPLORE_*): ищем
+                рёбра, где робот ещё не был.
+      * False — целевым может быть любое ребро, включая уже пройденное.
+                Используется в фазе PARKING: конечная цель — вернуться
+                на ребро со знаком парковки, даже если оно уже
+                посещалось раньше.
 
-    entry_edge — имя ребра, с которого робот приехал в start_node. Если оно
-    задано, то forbidden_entry применяется и на первом шаге. Иначе первый
-    шаг проходит без проверки (нет информации о предыдущем ребре).
+    Промежуточные рёбра пути могут быть посещёнными (транзит).
+
+    entry_edge — имя ребра, с которого робот приехал в start_node.
+    Если оно задано, то forbidden_entry применяется и на первом шаге.
+    Иначе первый шаг проходит без проверки (нет информации о том, откуда
+    робот въехал на узел).
 
     Учитывается forbidden_entry: цепочка недопустима, если предыдущее
     ребро числится в forbidden_entry следующего.
     """
     visited_nodes: set = set()
     queue: deque = deque()
-    # В очередь кладём тройку (node, path, prev_edge):
-    #   node      — текущий узел
-    #   path      — список рёбер, по которым сюда пришли
-    #   prev_edge — ребро, которым завершается path (или entry_edge на старте)
+    # Очередь несёт тройку (node, path, prev_edge):
+    #   node      — текущий узел;
+    #   path      — рёбра, которыми сюда пришли;
+    #   prev_edge — ребро, которым завершается path (или entry_edge
+    #               на старте).
     queue.append((start_node, [], entry_edge))
 
     while queue:
@@ -57,12 +68,11 @@ def bfs_find_target(
 
             new_path = path + [edge_name]
 
-            # Проверка «это наша цель?»
-            if not edge.is_visited and target_predicate(edge):
+            edge_ok = (not require_unvisited) or (not edge.is_visited)
+            if edge_ok and target_predicate(edge):
                 return new_path
 
-            # Иначе — идём дальше
-            next_node = edge_name[1]  # вторая буква имени ребра = узел-назначение
+            next_node = edge_name[1]  # вторая буква = узел-назначение
             if next_node in visited_nodes:
                 continue
             visited_nodes.add(next_node)
