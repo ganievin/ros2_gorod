@@ -1,0 +1,7 @@
+# Пустой запрос. goal_manager сам знает текущую позицию
+# из /tracking_topic, а состояние графа — из /graph.
+---
+bool   has_goal       # false — цель отсутствует, буфер пуст, миссия завершена
+string edge_name      # имя целевого ребра, например "BC"
+int32  orientation    # градусы, CCW от стартового взгляда
+string shape          # "straight" | "curved"
