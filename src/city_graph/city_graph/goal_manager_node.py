@@ -81,7 +81,9 @@ class GoalManagerNode(Node):
 
         # 3. Миссия завершена?
         if not self._buffer:
-            self.get_logger().info('buffer empty after planning → mission complete')
+            self.get_logger().info(
+                'buffer empty after planning → mission complete'
+            )
             response.has_goal = False
             return response
 
@@ -117,7 +119,8 @@ class GoalManagerNode(Node):
             cur_edge = self._roads.get(self._current.edge_name)
             if cur_edge is not None and cur_edge.have_parking:
                 self.get_logger().info(
-                    f'already on parking edge {cur_edge.name} → mission complete'
+                    f'already on parking edge {cur_edge.name} → '
+                    f'mission complete'
                 )
                 return
 
@@ -140,22 +143,29 @@ class GoalManagerNode(Node):
             target_predicate = lambda r: True
             phase = 'EXPLORE_FOR_PASSENGERS'
 
-        # ---- 2. Определяем стартовый узел ----
-        start_node = self._resolve_start_node()
+        # ---- 2. Определяем стартовый узел и ребро входа ----
+        start_node, entry_edge = self._resolve_start()
         if start_node is None:
             self.get_logger().warn(
                 f'cannot plan: current position={self._current.position_type}, '
-                f'node="{self._current.node_name}", edge="{self._current.edge_name}"'
+                f'node="{self._current.node_name}", '
+                f'edge="{self._current.edge_name}"'
             )
             return
 
         self.get_logger().info(
-            f'planning from node {start_node}, phase={phase}, '
-            f'passengers={passenger_count}, parking_known={parking_known}'
+            f'planning from node {start_node}, entry_edge={entry_edge}, '
+            f'phase={phase}, passengers={passenger_count}, '
+            f'parking_known={parking_known}'
         )
 
         # ---- 3. BFS ----
-        path = bfs_find_target(start_node, self._roads, target_predicate)
+        path = bfs_find_target(
+            start_node,
+            self._roads,
+            target_predicate,
+            entry_edge=entry_edge,
+        )
         if path is None:
             self.get_logger().warn('BFS found no route — buffer stays empty')
             return
@@ -164,15 +174,26 @@ class GoalManagerNode(Node):
         self.get_logger().info(f'planned path: {path}')
 
     # ------------------------------------------------------------------ helpers
-    def _resolve_start_node(self):
+    def _resolve_start(self):
+        """
+        Возвращает (start_node, entry_edge) — с какого узла начинать BFS
+        и с какого ребра на этот узел робот приехал (если известно).
+
+        Случаи:
+          * position_type == 'node' — знаем узел и (если трекер заполнил)
+            ребро входа;
+          * position_type == 'edge' — едем к концу текущего ребра,
+            entry_edge = текущее ребро;
+          * иначе — не можем планировать.
+        """
         pos = self._current
         if pos.position_type == 'node':
-            return pos.node_name or None
+            entry = pos.entry_edge if pos.entry_edge else None
+            return (pos.node_name or None), entry
         if pos.position_type == 'edge':
-            # Мы на ребре — считаем, что движемся к его концу (вторая буква)
             if pos.edge_name and len(pos.edge_name) == 2:
-                return pos.edge_name[1]
-        return None
+                return pos.edge_name[1], pos.edge_name
+        return None, None
 
     @staticmethod
     def _to_road(msg: RoadInfo) -> Road:
