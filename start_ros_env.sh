@@ -1,33 +1,30 @@
 #!/bin/bash
-# Активация ROS2 Jazzy
+# Окружение для воркспейса gorod-clean (ROS2 Jazzy)
+
+# 1. ROS2 Jazzy
 if [ -f /opt/ros/jazzy/setup.bash ]; then
     source /opt/ros/jazzy/setup.bash
     echo "✅ ROS2 Jazzy активирован"
-    # Проверка что ros2 доступен
-    if command -v ros2 &> /dev/null; then
-        ros2 --version
-    else
-        echo "⚠️  ros2 команда не найдена, но установка есть"
-        echo "Попробуйте: source /opt/ros/jazzy/setup.bash"
-    fi
 else
     echo "❌ ROS2 Jazzy не найден в /opt/ros/jazzy/"
+    return 1 2>/dev/null || exit 1
 fi
 
-# Активация виртуального окружения
-if [ -f ~/cvat/plavki/ros_venv/bin/activate ]; then
-    source ~/cvat/plavki/ros_venv/bin/activate
-    echo "✅ Виртуальное окружение активировано"
+# 2. Воркспейс gorod-clean
+WORKSPACE="$HOME/cvat/gorod-clean"
+if [ -f "$WORKSPACE/install/setup.bash" ]; then
+    source "$WORKSPACE/install/setup.bash"
+    echo "✅ Воркспейс gorod-clean активирован"
 else
-    echo "❌ Виртуальное окружение не найдено"
+    echo "⚠️  $WORKSPACE/install/setup.bash не найден"
+    echo "    Сначала соберите воркспейс: cd $WORKSPACE && colcon build"
 fi
 
-# Добавление ROS Python пакетов
-export PYTHONPATH=/opt/ros/jazzy/lib/python3.12/site-packages:$PYTHONPATH
-export PYTHONPATH=/opt/ros/jazzy/local/lib/python3.12/site-packages:$PYTHONPATH
-
-echo "Python: $(python3 --version)"
+# 3. Проверка
 echo ""
-echo "🚀 Теперь можно запускать ноду:"
-echo "cd ~/cvat/plavki/src/trafic_detection/trafic_detection"
-echo "python3 traffic_detector.py"
+echo "Python: $(which python3) — $(python3 --version 2>&1)"
+echo "ROS2: $(command -v ros2 || echo 'не найден')"
+echo ""
+echo "Доступные пакеты воркспейса:"
+ros2 pkg list 2>/dev/null | grep -E "city_graph|city_interfaces|trafic_detection" || echo "  (пока ничего — соберите colcon build)"
+
