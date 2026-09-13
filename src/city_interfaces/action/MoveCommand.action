@@ -1,0 +1,15 @@
+# Одна атомарная команда для микроконтроллера через STM_comm_node.
+
+# command_type:
+#   "TURN"          — танковый поворот на месте на 90°;
+#   "GO_STRAIGHT"   — прямолинейное движение вперёд.
+# direction (только для TURN): "RIGHT" | "LEFT".
+# distance_mm (только для GO_STRAIGHT): целое число миллиметров.
+string command_type
+string direction
+int32  distance_mm
+---
+# Result: успех или провал команды.
+bool   success
+---
+# Feedback пока не используется.
