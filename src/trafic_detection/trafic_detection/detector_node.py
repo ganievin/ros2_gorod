@@ -15,7 +15,7 @@ class TrafficDetector(Node):
         super().__init__('traffic_detector')
 
         # ==================== ПАРАМЕТРЫ ====================
-        self.declare_parameter('model_path', '/home/yana/cvat/plavki/yolov8/runs/detect/yolo_light/weights/best.pt')
+        self.declare_parameter('model_path', '/home/redonnukes/ros2_workspace/yolov8/weights/best.pt')
         self.declare_parameter('confidence', 0.5)
         self.declare_parameter('camera_topic', '/image_raw')
         self.declare_parameter('custom_classes', [0, 1, 2, 3, 4, 5, 6, 7])  
