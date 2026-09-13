@@ -16,6 +16,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/GraphUpdate.msg"
   "msg/TrackingInfo.msg"
   "srv/GetNextGoal.srv"
+  "action/MoveCommand.action"
   DEPENDENCIES std_msgs
 )
 

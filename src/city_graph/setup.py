@@ -19,9 +19,9 @@ setup(
     license='MIT',
     entry_points={
         'console_scripts': [
-            'graph_storage_node = city_graph.graph_storage_node:main',
-            'goal_manager_node  = city_graph.goal_manager_node:main',
+            'graph_storage_node    = city_graph.graph_storage_node:main',
+            'goal_manager_node     = city_graph.goal_manager_node:main',
+            'goal_fragmentator_node = city_graph.goal_fragmentator_node:main',
         ],
     },
 )
-
