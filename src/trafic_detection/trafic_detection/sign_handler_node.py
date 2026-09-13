@@ -4,7 +4,7 @@
 import rclpy
 from rclpy.node import Node
 from std_msgs.msg import String, Bool
-from city_interfaces.msg import GraphUpdate
+from city_interfaces.msg import GraphUpdate, TrackingInfo
 
 
 class Road:
@@ -12,7 +12,7 @@ class Road:
     def __init__(self, name):
         self.name = name
         self.is_visited = False
-        self.forbidden_entry = []      # список имён рёбер-источников
+        self.forbidden_entry = []
         self.have_parking = False
         self.have_passengers = False
 
@@ -21,7 +21,6 @@ class SignHandlerNode(Node):
     def __init__(self):
         super().__init__('sign_handler_node')
 
-        # Параметры
         self.declare_parameter('tracking_topic', '/tracking_topic')
         self.declare_parameter('detected_sign_topic', '/detected_sign')
         self.declare_parameter('sign_is_close_topic', '/sign_is_close')
@@ -37,13 +36,14 @@ class SignHandlerNode(Node):
         self.initial_position = self.get_parameter('initial_position').value
 
         # Состояние
-        self.current_node = None
-        self.current_edge = None
+        self.current_node = None       # 'A'..'E' при position_type == 'node'
+        self.current_edge = None       # (u, v) при position_type == 'edge'
+        self.entry_edge = None         # (u, v) — ребро, с которого приехали в узел
         self.last_sign = None
         self.sign_is_close = False
         self.is_stopped = False
         self.stop_timer = None
-        self.applied_on_edge = set()   # знаки, уже применённые на текущем ребре
+        self.applied_on_edge = set()
 
         # Граф: 16 направленных рёбер
         self.edges = [
@@ -62,11 +62,11 @@ class SignHandlerNode(Node):
             name = u + v
             road = Road(name)
             self.roads.append(road)
-            self.road_map[(u, v)] = road       # ключ — упорядоченный кортеж
+            self.road_map[(u, v)] = road
 
         # Подписки
         self.sub_tracking = self.create_subscription(
-            String, self.tracking_topic, self.tracking_callback, 10)
+            TrackingInfo, self.tracking_topic, self.tracking_callback, 10)
         self.sub_sign = self.create_subscription(
             String, self.detected_sign_topic, self.sign_callback, 10)
         self.sub_close = self.create_subscription(
@@ -80,16 +80,13 @@ class SignHandlerNode(Node):
         self.get_logger().info(f'Stop duration: {self.stop_duration} seconds')
         self.get_logger().info(f'Initial position parameter: {self.initial_position!r}')
 
-        # Инициализация начального положения робота
         self.apply_initial_position()
 
     # ---------- Вспомогательные методы ----------
     def get_road(self, u, v):
-        """Возвращает направленное ребро u → v, или None."""
         return self.road_map.get((u, v))
 
     def get_neighbors(self, node):
-        """Список уникальных соседей узла (по ненаправленной топологии)."""
         neighbors = []
         for u, v in self.edges:
             if u == node and v not in neighbors:
@@ -99,7 +96,6 @@ class SignHandlerNode(Node):
         return neighbors
 
     def publish_graph_update(self, road_name, attribute_name, values):
-        """Публикует одно изменение атрибута ребра в city_interfaces/GraphUpdate."""
         msg = GraphUpdate()
         msg.road_name = road_name
         msg.attribute_name = attribute_name
@@ -108,8 +104,23 @@ class SignHandlerNode(Node):
         self.get_logger().info(
             f'Graph update: {road_name} {attribute_name} = {values}')
 
+    def _is_new_journey(self, u, v):
+        """True, если (u, v) — новое ребро относительно текущего положения."""
+        if self.current_edge is not None:
+            return (u, v) != self.current_edge
+        if self.entry_edge is not None:
+            return (u, v) != self.entry_edge
+        return True
+
+    def _current_position(self):
+        """Возвращает (from_node, target_node) или (None, None)."""
+        if self.current_edge is not None:
+            return self.current_edge
+        if self.entry_edge is not None and self.current_node is not None:
+            return self.entry_edge
+        return (None, None)
+
     def apply_initial_position(self):
-        """Устанавливает начальное положение робота из параметра initial_position."""
         pos = str(self.initial_position).strip()
 
         if not pos:
@@ -137,34 +148,70 @@ class SignHandlerNode(Node):
                 f'Invalid initial_position: {pos!r} (expected "A" or "AB")')
 
     # ---------- Callback'и ----------
-    def tracking_callback(self, msg):
-        data = msg.data.strip()
-
+    def tracking_callback(self, msg: TrackingInfo):
         if self.is_stopped:
             return
 
-        # Одна буква = робот на узле
-        if len(data) == 1 and data in ['A', 'B', 'C', 'D', 'E']:
-            self.current_node = data
-            self.get_logger().info(f'Current node: {data}')
+        pt = msg.position_type.strip()
 
-        # Две буквы = робот на ребре
-        elif len(data) == 2 and data[0] in 'ABCDE' and data[1] in 'ABCDE':
-            u, v = data[0], data[1]
-            new_edge = (u, v)
-            if new_edge != self.current_edge:
-                self.applied_on_edge = set()   # новое ребро — сбрасываем
-            self.current_edge = new_edge
+        if pt == 'node':
+            node = msg.node_name.strip()
+            entry = msg.entry_edge.strip()
+
+            if node not in ['A', 'B', 'C', 'D', 'E']:
+                self.get_logger().warn(
+                    f'Invalid node_name in TrackingInfo: {node!r}')
+                return
+
+            if entry and (len(entry) != 2
+                          or entry[0] not in 'ABCDE'
+                          or entry[1] not in 'ABCDE'):
+                self.get_logger().warn(
+                    f'Invalid entry_edge in TrackingInfo: {entry!r}')
+                entry = ''
+
+            self.current_node = node
+            self.current_edge = None
+            self.entry_edge = (entry[0], entry[1]) if entry else None
+
+            self.get_logger().info(
+                f'Current node: {node} entry_edge={entry or "-"} '
+                f'(heading={msg.heading_deg})')
+
+        elif pt == 'edge':
+            edge = msg.edge_name.strip()
+
+            if (len(edge) != 2
+                    or edge[0] not in 'ABCDE'
+                    or edge[1] not in 'ABCDE'):
+                self.get_logger().warn(
+                    f'Invalid edge_name in TrackingInfo: {edge!r}')
+                return
+
+            u, v = edge[0], edge[1]
+            if self._is_new_journey(u, v):
+                self.applied_on_edge = set()
+
+            self.current_edge = (u, v)
             self.current_node = None
-            self.get_logger().info(f'Current edge: {data}')
+            self.entry_edge = None
+
+            self.get_logger().info(
+                f'Current edge: {edge} progress={msg.progress:.2f} '
+                f'heading={msg.heading_deg}')
 
             road = self.get_road(u, v)
             if road and not road.is_visited:
                 road.is_visited = True
                 self.publish_graph_update(road.name, 'is_visited', ['yes'])
 
+        elif pt == 'unknown':
+            self.get_logger().debug('Tracking position_type: unknown')
+
         else:
-            self.get_logger().warn(f'Unknown tracking format: {data!r}')
+            self.get_logger().warn(
+                f'Unknown position_type in TrackingInfo: {pt!r} '
+                f'(expected "node" | "edge" | "unknown")')
 
     def sign_callback(self, msg):
         self.last_sign = msg.data
@@ -173,37 +220,31 @@ class SignHandlerNode(Node):
     def close_callback(self, msg):
         self.sign_is_close = msg.data
 
-        # Знак применяем, пока робот на ребре (едет к узлу current_edge[1]).
-        if (self.sign_is_close
-                and self.last_sign is not None
-                and self.current_edge is not None):
-            target_node = self.current_edge[1]
-            self.apply_sign_restriction(target_node, self.last_sign)
-
-    # ---------- Основная логика ----------
-    def apply_sign_restriction(self, node, sign):
-        if self.current_edge is None:
-            self.get_logger().warn('No current edge, cannot apply sign restriction')
+        if not self.sign_is_close or self.last_sign is None:
             return
 
-        # Защита от повторного применения того же знака на этом ребре
+        from_node, _ = self._current_position()
+        if from_node is None:
+            return
+
+        self.apply_sign_restriction(self.last_sign)
+
+    # ---------- Основная логика ----------
+    def apply_sign_restriction(self, sign):
+        from_node, node = self._current_position()
+        if from_node is None:
+            self.get_logger().warn(
+                'No current position, cannot apply sign restriction')
+            return
+
         if sign in self.applied_on_edge:
             return
         self.applied_on_edge.add(sign)
 
-        from_node = self.current_edge[0]
-        target_node = self.current_edge[1]
-
-        if target_node != node:
-            self.get_logger().warn(
-                f'Sign at {node} ignored: edge {self.current_edge} leads to {target_node}'
-            )
-            return
-
-        current_road = self.get_road(from_node, target_node)
+        current_road = self.get_road(from_node, node)
         if current_road is None:
             self.get_logger().warn(
-                f'Current road not found for {from_node}-{target_node}')
+                f'Current road not found for {from_node}-{node}')
             return
 
         neighbors = self.get_neighbors(node)
@@ -341,10 +382,12 @@ class SignHandlerNode(Node):
         if self.is_stopped:
             return
         self.is_stopped = True
-        self.get_logger().info(f'Robot stopped for {self.stop_duration} seconds')
+        self.get_logger().info(
+            f'Robot stopped for {self.stop_duration} seconds')
         if self.stop_timer is not None:
             self.stop_timer.cancel()
-        self.stop_timer = self.create_timer(self.stop_duration, self.resume_robot)
+        self.stop_timer = self.create_timer(
+            self.stop_duration, self.resume_robot)
 
     def resume_robot(self):
         self.is_stopped = False
