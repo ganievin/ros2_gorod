@@ -1,6 +1,23 @@
+# ROS
 build/
 install/
 log/
-.vscode/
-*.pyc
+
+# Python
 __pycache__/
+*.pyc
+*.pyo
+venv/
+.venv/
+ros_venv/
+
+# Модели
+*.pt
+*.pth
+*.onnx
+*.engine
+yolov8/weights/
+
+# IDE
+.vscode/
+.idea/
