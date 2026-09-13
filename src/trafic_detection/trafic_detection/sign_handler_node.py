@@ -7,6 +7,40 @@ from std_msgs.msg import String, Bool
 from city_interfaces.msg import GraphUpdate, TrackingInfo
 
 
+# ---------- Таблицы направлений ----------
+# Геометрия: A=(-a,0), B=(0,a), C=(a,0), D=(0,-a), E=(0,0).
+# Курс = направление последней половины ребра-входа.
+# straight/right/left — куда ведёт выезд из узла; None = такого выезда нет.
+
+TURN_TABLE = {
+    # --- узел A (соседи B, D, E) ---
+    ('B', 'A'): {'straight': 'D', 'right': None, 'left': 'E'},
+    ('D', 'A'): {'straight': 'B', 'right': 'E', 'left': None},
+    ('E', 'A'): {'straight': None, 'right': 'B', 'left': 'D'},
+
+    # --- узел B (соседи A, C, E) ---
+    ('A', 'B'): {'straight': 'C', 'right': 'E', 'left': None},
+    ('C', 'B'): {'straight': 'A', 'right': None, 'left': 'E'},
+    ('E', 'B'): {'straight': None, 'right': 'C', 'left': 'A'},
+
+    # --- узел C (соседи B, D, E) ---
+    ('B', 'C'): {'straight': 'D', 'right': 'E', 'left': None},
+    ('D', 'C'): {'straight': 'B', 'right': None, 'left': 'E'},
+    ('E', 'C'): {'straight': None, 'right': 'D', 'left': 'B'},
+
+    # --- узел D (соседи A, C, E) ---
+    ('A', 'D'): {'straight': None, 'right': 'A', 'left': 'C'},
+    ('C', 'D'): {'straight': 'A', 'right': 'E', 'left': None},
+    ('E', 'D'): {'straight': None, 'right': 'A', 'left': 'C'},
+
+    # --- центральный узел E (соседи A, B, C, D) ---
+    ('A', 'E'): {'straight': 'C', 'right': 'D', 'left': 'B'},
+    ('B', 'E'): {'straight': 'D', 'right': 'A', 'left': 'C'},
+    ('C', 'E'): {'straight': 'A', 'right': 'B', 'left': 'D'},
+    ('D', 'E'): {'straight': 'B', 'right': 'C', 'left': 'A'},
+}
+
+
 class Road:
     """Одно направленное ребро графа дорог."""
     def __init__(self, name):
@@ -36,14 +70,15 @@ class SignHandlerNode(Node):
         self.initial_position = self.get_parameter('initial_position').value
 
         # Состояние
-        self.current_node = None       # 'A'..'E' при position_type == 'node'
-        self.current_edge = None       # (u, v) при position_type == 'edge'
-        self.entry_edge = None         # (u, v) — ребро, с которого приехали в узел
+        self.current_node = None
+        self.current_edge = None
+        self.entry_edge = None
         self.last_sign = None
         self.sign_is_close = False
         self.is_stopped = False
         self.stop_timer = None
         self.applied_on_edge = set()
+        self.applied_position_key = None   # (from, node) или (u, v) — для сброса applied_on_edge
 
         # Граф: 16 направленных рёбер
         self.edges = [
@@ -65,11 +100,11 @@ class SignHandlerNode(Node):
             self.road_map[(u, v)] = road
 
         # Подписки
-        self.sub_tracking = self.create_subscription(
+        self.create_subscription(
             TrackingInfo, self.tracking_topic, self.tracking_callback, 10)
-        self.sub_sign = self.create_subscription(
+        self.create_subscription(
             String, self.detected_sign_topic, self.sign_callback, 10)
-        self.sub_close = self.create_subscription(
+        self.create_subscription(
             Bool, self.sign_is_close_topic, self.close_callback, 10)
 
         # Публикация
@@ -82,7 +117,7 @@ class SignHandlerNode(Node):
 
         self.apply_initial_position()
 
-    # ---------- Вспомогательные методы ----------
+    # ---------- Вспомогательные ----------
     def get_road(self, u, v):
         return self.road_map.get((u, v))
 
@@ -104,114 +139,96 @@ class SignHandlerNode(Node):
         self.get_logger().info(
             f'Graph update: {road_name} {attribute_name} = {values}')
 
-    def _is_new_journey(self, u, v):
-        """True, если (u, v) — новое ребро относительно текущего положения."""
-        if self.current_edge is not None:
-            return (u, v) != self.current_edge
-        if self.entry_edge is not None:
-            return (u, v) != self.entry_edge
-        return True
+    def _set_position_key(self, key):
+        """Сброс applied_on_edge при смене позиции."""
+        if key != self.applied_position_key:
+            self.applied_on_edge = set()
+            self.applied_position_key = key
 
     def _current_position(self):
-        """Возвращает (from_node, target_node) или (None, None)."""
+        """(from_node, node) или (None, None)."""
         if self.current_edge is not None:
             return self.current_edge
         if self.entry_edge is not None and self.current_node is not None:
             return self.entry_edge
         return (None, None)
 
+    def _turn_dirs(self, from_node, node):
+        key = (from_node, node)
+        if key in TURN_TABLE:
+            return TURN_TABLE[key]
+        self.get_logger().warn(f'No turn table for from={from_node} to={node}')
+        return {'straight': None, 'right': None, 'left': None}
+
     def apply_initial_position(self):
         pos = str(self.initial_position).strip()
-
         if not pos:
-            self.get_logger().info('Initial position not set, starting empty')
             return
-
         if len(pos) == 1 and pos in ['A', 'B', 'C', 'D', 'E']:
             self.current_node = pos
             self.current_edge = None
+            self._set_position_key(('node', pos))
             self.get_logger().info(f'Initial position: node {pos}')
-
         elif len(pos) == 2 and pos[0] in 'ABCDE' and pos[1] in 'ABCDE':
             u, v = pos[0], pos[1]
             self.current_edge = (u, v)
             self.current_node = None
+            self._set_position_key(('edge', u, v))
             self.get_logger().info(f'Initial position: edge {pos}')
-
             road = self.get_road(u, v)
             if road and not road.is_visited:
                 road.is_visited = True
                 self.publish_graph_update(road.name, 'is_visited', ['yes'])
-
         else:
-            self.get_logger().warn(
-                f'Invalid initial_position: {pos!r} (expected "A" or "AB")')
+            self.get_logger().warn(f'Invalid initial_position: {pos!r}')
 
     # ---------- Callback'и ----------
     def tracking_callback(self, msg: TrackingInfo):
         if self.is_stopped:
             return
-
         pt = msg.position_type.strip()
 
         if pt == 'node':
             node = msg.node_name.strip()
             entry = msg.entry_edge.strip()
-
             if node not in ['A', 'B', 'C', 'D', 'E']:
-                self.get_logger().warn(
-                    f'Invalid node_name in TrackingInfo: {node!r}')
+                self.get_logger().warn(f'Invalid node_name: {node!r}')
                 return
-
-            if entry and (len(entry) != 2
-                          or entry[0] not in 'ABCDE'
-                          or entry[1] not in 'ABCDE'):
-                self.get_logger().warn(
-                    f'Invalid entry_edge in TrackingInfo: {entry!r}')
+            if entry and (len(entry) != 2 or entry[0] not in 'ABCDE' or entry[1] not in 'ABCDE'):
+                self.get_logger().warn(f'Invalid entry_edge: {entry!r}')
                 entry = ''
-
+            if entry:
+                from_node = entry[0]
+                self._set_position_key(('node', node, from_node))
+            else:
+                self._set_position_key(('node', node, None))
             self.current_node = node
             self.current_edge = None
             self.entry_edge = (entry[0], entry[1]) if entry else None
-
             self.get_logger().info(
-                f'Current node: {node} entry_edge={entry or "-"} '
-                f'(heading={msg.heading_deg})')
+                f'Current node: {node} entry_edge={entry or "-"} heading={msg.heading_deg}')
 
         elif pt == 'edge':
             edge = msg.edge_name.strip()
-
-            if (len(edge) != 2
-                    or edge[0] not in 'ABCDE'
-                    or edge[1] not in 'ABCDE'):
-                self.get_logger().warn(
-                    f'Invalid edge_name in TrackingInfo: {edge!r}')
+            if len(edge) != 2 or edge[0] not in 'ABCDE' or edge[1] not in 'ABCDE':
+                self.get_logger().warn(f'Invalid edge_name: {edge!r}')
                 return
-
             u, v = edge[0], edge[1]
-            if self._is_new_journey(u, v):
-                self.applied_on_edge = set()
-
+            self._set_position_key(('edge', u, v))
             self.current_edge = (u, v)
             self.current_node = None
             self.entry_edge = None
-
             self.get_logger().info(
-                f'Current edge: {edge} progress={msg.progress:.2f} '
-                f'heading={msg.heading_deg}')
-
+                f'Current edge: {edge} progress={msg.progress:.2f} heading={msg.heading_deg}')
             road = self.get_road(u, v)
             if road and not road.is_visited:
                 road.is_visited = True
                 self.publish_graph_update(road.name, 'is_visited', ['yes'])
 
         elif pt == 'unknown':
-            self.get_logger().debug('Tracking position_type: unknown')
-
+            pass
         else:
-            self.get_logger().warn(
-                f'Unknown position_type in TrackingInfo: {pt!r} '
-                f'(expected "node" | "edge" | "unknown")')
+            self.get_logger().warn(f'Unknown position_type: {pt!r}')
 
     def sign_callback(self, msg):
         self.last_sign = msg.data
@@ -219,175 +236,108 @@ class SignHandlerNode(Node):
 
     def close_callback(self, msg):
         self.sign_is_close = msg.data
-
         if not self.sign_is_close or self.last_sign is None:
             return
-
-        from_node, _ = self._current_position()
-        if from_node is None:
-            return
-
-        self.apply_sign_restriction(self.last_sign)
-
-    # ---------- Основная логика ----------
-    def apply_sign_restriction(self, sign):
         from_node, node = self._current_position()
         if from_node is None:
-            self.get_logger().warn(
-                'No current position, cannot apply sign restriction')
             return
+        self.apply_sign_restriction(from_node, node, self.last_sign)
 
+    # ---------- Основная логика ----------
+    def apply_sign_restriction(self, from_node, node, sign):
         if sign in self.applied_on_edge:
             return
         self.applied_on_edge.add(sign)
 
         current_road = self.get_road(from_node, node)
         if current_road is None:
-            self.get_logger().warn(
-                f'Current road not found for {from_node}-{node}')
+            self.get_logger().warn(f'Current road not found for {from_node}-{node}')
             return
 
-        neighbors = self.get_neighbors(node)
-        possible_directions = [n for n in neighbors if n != from_node]
+        all_exits = self.get_neighbors(node)
+        turn = self._turn_dirs(from_node, node)
 
-        # ---- ПРЯМО ----
-        if sign == 'pryamo':
-            if node in ['A', 'B', 'C', 'D']:
-                perim_neighbors = {
-                    'A': ['B', 'D'],
-                    'B': ['A', 'C'],
-                    'C': ['B', 'D'],
-                    'D': ['A', 'C']
-                }
-                if from_node in perim_neighbors[node]:
-                    straight = [x for x in perim_neighbors[node] if x != from_node][0]
-                else:
-                    straight = perim_neighbors[node][0]
-            else:
-                opposite_map = {'A': 'C', 'B': 'D', 'C': 'A', 'D': 'B'}
-                if from_node in opposite_map:
-                    straight = opposite_map[from_node]
-                else:
-                    self.get_logger().warn(
-                        'Node E: unknown entry direction, cannot determine straight')
-                    return
-
-            if straight in possible_directions:
-                for d in possible_directions:
-                    if d != straight:
-                        target_road = self.get_road(node, d)
-                        if (target_road
-                                and current_road.name not in target_road.forbidden_entry):
-                            target_road.forbidden_entry.append(current_road.name)
-                            self.publish_graph_update(
-                                target_road.name, 'forbidden_entry',
-                                [current_road.name])
-                self.get_logger().info(
-                    f'Node {node}: only straight to {straight} allowed')
-            else:
-                self.get_logger().warn(
-                    f'Straight direction {straight} not available from {node}')
-
-        # ---- НАПРАВО ----
-        elif sign == 'pravo':
-            right_map = {'A': 'B', 'B': 'C', 'C': 'D', 'D': 'A', 'E': 'A'}
-            right = right_map.get(node)
-            if right in possible_directions:
-                for d in possible_directions:
-                    if d != right:
-                        target_road = self.get_road(node, d)
-                        if (target_road
-                                and current_road.name not in target_road.forbidden_entry):
-                            target_road.forbidden_entry.append(current_road.name)
-                            self.publish_graph_update(
-                                target_road.name, 'forbidden_entry',
-                                [current_road.name])
-                self.get_logger().info(
-                    f'Node {node}: only right to {right} allowed')
-            else:
-                self.get_logger().warn(
-                    f'Right direction {right} not available from {node}')
-
-        # ---- НАЛЕВО ----
-        elif sign == 'levo':
-            left_map = {'A': 'D', 'B': 'A', 'C': 'B', 'D': 'C', 'E': 'D'}
-            left = left_map.get(node)
-            if left in possible_directions:
-                for d in possible_directions:
-                    if d != left:
-                        target_road = self.get_road(node, d)
-                        if (target_road
-                                and current_road.name not in target_road.forbidden_entry):
-                            target_road.forbidden_entry.append(current_road.name)
-                            self.publish_graph_update(
-                                target_road.name, 'forbidden_entry',
-                                [current_road.name])
-                self.get_logger().info(
-                    f'Node {node}: only left to {left} allowed')
-            else:
-                self.get_logger().warn(
-                    f'Left direction {left} not available from {node}')
-
-        # ---- НЕ НАПРАВО ----
-        elif sign == 'nepravo':
-            right_map = {'A': 'B', 'B': 'C', 'C': 'D', 'D': 'A', 'E': 'A'}
-            right = right_map.get(node)
-            if right in possible_directions:
-                target_road = self.get_road(node, right)
-                if (target_road
-                        and current_road.name not in target_road.forbidden_entry):
-                    target_road.forbidden_entry.append(current_road.name)
-                    self.publish_graph_update(
-                        target_road.name, 'forbidden_entry',
-                        [current_road.name])
-                self.get_logger().info(
-                    f'Node {node}: right turn to {right} forbidden')
-
-        # ---- НЕ НАЛЕВО ----
-        elif sign == 'nelevo':
-            left_map = {'A': 'D', 'B': 'A', 'C': 'B', 'D': 'C', 'E': 'D'}
-            left = left_map.get(node)
-            if left in possible_directions:
-                target_road = self.get_road(node, left)
-                if (target_road
-                        and current_road.name not in target_road.forbidden_entry):
-                    target_road.forbidden_entry.append(current_road.name)
-                    self.publish_graph_update(
-                        target_road.name, 'forbidden_entry',
-                        [current_road.name])
-                self.get_logger().info(
-                    f'Node {node}: left turn to {left} forbidden')
-
-        # ---- ПАРКОВКА ----
-        elif sign == 'parkovka':
+        # --- Знаки «Остановка»/«Парковка»: отметка на текущем ребре ---
+        if sign == 'parkovka':
             if not current_road.have_parking:
                 current_road.have_parking = True
-                self.publish_graph_update(
-                    current_road.name, 'have_parking', ['yes'])
-
-        # ---- ОСТАНОВКА ----
-        elif sign == 'ostanovka':
+                self.publish_graph_update(current_road.name, 'have_parking', ['yes'])
+            return
+        if sign == 'ostanovka':
             if not current_road.have_passengers:
                 current_road.have_passengers = True
-                self.publish_graph_update(
-                    current_road.name, 'have_passengers', ['yes'])
+                self.publish_graph_update(current_road.name, 'have_passengers', ['yes'])
+            return
+        if sign == 'opasnost':
+            self.stop_robot()
+            return
 
-        # ---- ОПАСНОСТЬ / НЕИЗВЕСТНЫЙ ----
-        elif sign == 'opasnost':
-            self.stop_robot()
+        # --- Знаки направления ---
+        if sign == 'pravo':
+            allowed = turn['right']
+            desc = 'right'
+        elif sign == 'levo':
+            allowed = turn['left']
+            desc = 'left'
+        elif sign == 'pryamo':
+            allowed = turn['straight']
+            desc = 'straight'
+        elif sign == 'nepravo':
+            forbidden_only = turn['right']
+            if forbidden_only is None:
+                self.get_logger().warn(
+                    f'Node {node} (from {from_node}): no right to forbid')
+                return
+            self._forbid(node, from_node, current_road, [forbidden_only])
+            self.get_logger().info(
+                f'Node {node} (from {from_node}): right to {forbidden_only} forbidden')
+            return
+        elif sign == 'nelevo':
+            forbidden_only = turn['left']
+            if forbidden_only is None:
+                self.get_logger().warn(
+                    f'Node {node} (from {from_node}): no left to forbid')
+                return
+            self._forbid(node, from_node, current_road, [forbidden_only])
+            self.get_logger().info(
+                f'Node {node} (from {from_node}): left to {forbidden_only} forbidden')
+            return
         else:
+            self.get_logger().warn(f'Unknown sign: {sign!r}')
             self.stop_robot()
+            return
+
+        if allowed is None:
+            self.get_logger().warn(
+                f'Node {node} (from {from_node}): no {desc} direction')
+            return
+
+        # Запрещаем все выезды из узла, кроме разрешённого.
+        # all_exits включает from_node — так запрещается и U-turn.
+        forbidden = [x for x in all_exits if x != allowed]
+        self._forbid(node, from_node, current_road, forbidden)
+        self.get_logger().info(
+            f'Node {node} (from {from_node}): only {desc} to {allowed}')
+
+    def _forbid(self, node, from_node, current_road, targets):
+        for d in targets:
+            target_road = self.get_road(node, d)
+            if target_road is None:
+                continue
+            if current_road.name in target_road.forbidden_entry:
+                continue
+            target_road.forbidden_entry.append(current_road.name)
+            self.publish_graph_update(
+                target_road.name, 'forbidden_entry', [current_road.name])
 
     def stop_robot(self):
         if self.is_stopped:
             return
         self.is_stopped = True
-        self.get_logger().info(
-            f'Robot stopped for {self.stop_duration} seconds')
+        self.get_logger().info(f'Robot stopped for {self.stop_duration} seconds')
         if self.stop_timer is not None:
             self.stop_timer.cancel()
-        self.stop_timer = self.create_timer(
-            self.stop_duration, self.resume_robot)
+        self.stop_timer = self.create_timer(self.stop_duration, self.resume_robot)
 
     def resume_robot(self):
         self.is_stopped = False
