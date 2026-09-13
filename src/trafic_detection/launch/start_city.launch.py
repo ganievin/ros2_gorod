@@ -14,6 +14,9 @@ def generate_launch_description():
                 'confidence': 0.6,
                 'roi_x_min_ratio': 0.4,
             }],
+            remappings=[
+                ('/image_raw', '/camera/image_raw'),
+            ],
         ),
 
         # 2. Оценка дистанции до знака -> /sign_is_close

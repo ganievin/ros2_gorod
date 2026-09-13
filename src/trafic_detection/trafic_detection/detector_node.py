@@ -180,7 +180,7 @@ class TrafficDetector(Node):
             img_msg.header = header
             self.image_publisher.publish(img_msg)
         except Exception as e:
-            self.get_logger().error(f'Не удалось опубликовать изображение: {e}')
+            pass  # отладочная картинка не критична
 
 def main(args=None):
     rclpy.init(args=args)
